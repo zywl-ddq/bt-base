@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package trading_base;
+
+service TradingBase {
+  rpc Register(StrategyConfig) returns (RegisterAck);
+  rpc Unregister(StrategyId) returns (UnregisterAck);
+  rpc SubscribeBars(BarRequest) returns (stream Bar);
+  rpc SubmitSignal(Signal) returns (SignalAck);
+  rpc GetState(StateRequest) returns (StateResponse);
+  rpc ClosePosition(CloseRequest) returns (CloseAck);
+}
+
+message StrategyConfig {
+  string strategy_id = 1;
+  repeated string symbols = 2;
+  repeated string required_fields = 3;
+  repeated FactorDef factors = 4;
+  double max_leverage = 10;
+  double max_position_pct = 11;
+  double daily_loss_limit_pct = 12;
+}
+
+message FactorDef {
+  string name = 1;
+  string code = 2;
+  string timescale = 3;
+  map<string, double> params = 4;
+}
+
+message RegisterAck {
+  bool ok = 1;
+  string error = 2;
+}
+
+message StrategyId {
+  string strategy_id = 1;
+}
+
+message UnregisterAck {
+  bool ok = 1;
+}
+
+message BarRequest {
+  string symbol = 1;
+}
+
+message Bar {
+  string symbol = 1;
+  int64 ts_ns = 2;
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double close = 6;
+
+  optional double volume = 10;
+  optional double delta = 11;
+  optional double taker_buy_vol = 12;
+  optional double taker_sell_vol = 13;
+  optional double btc_close = 14;
+
+  map<string, double> factors = 20;
+  optional PositionState position = 30;
+}
+
+message PositionState {
+  enum Side { LONG = 0; SHORT = 1; }
+  Side side = 1;
+  double entry_price = 2;
+  double current_price = 3;
+  double unrealized_pnl_pct = 4;
+  int32 bars_held = 5;
+  double highest_price = 6;
+  double lowest_price = 7;
+  bool breakeven_activated = 8;
+  double current_atr = 9;
+}
+
+message Signal {
+  enum Direction { FLAT = 0; LONG = 1; SHORT = -1; }
+  Direction direction = 1;
+  string reason = 2;
+  int64 bar_ts_ns = 3;
+  optional ExitConditions exit = 10;
+  double position_size_pct = 11;
+}
+
+message ExitConditions {
+  optional double hard_stop_price = 1;
+  optional double take_profit_price = 2;
+  optional TrailingStop trailing = 3;
+  optional int32 max_hold_bars = 4;
+  optional double min_return_pct = 5;
+}
+
+message TrailingStop {
+  double trigger_atr_mult = 1;
+  double stop_atr_mult = 2;
+}
+
+message SignalAck {
+  bool accepted = 1;
+  string reject_reason = 2;
+}
+
+message StateRequest {}
+
+message StateResponse {
+  double equity = 1;
+  double daily_pnl = 2;
+  bool circuit_breaker = 3;
+  repeated PositionState positions = 4;
+}
+
+message CloseRequest {}
+
+message CloseAck {
+  bool ok = 1;
+}
