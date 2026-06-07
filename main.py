@@ -61,8 +61,8 @@ async def load_tick_delta(pool, symbol: str, hours: int) -> pd.DataFrame | None:
     """Load 1m aggregated tick delta for CVD factor."""
     rows = await pool.fetch(
         """SELECT time_bucket('1 minute', ts_event) AS ts,
-                  SUM(CASE WHEN aggressor='BUY' THEN price*size ELSE 0 END) AS buy_vol,
-                  SUM(CASE WHEN aggressor='SELL' THEN price*size ELSE 0 END) AS sell_vol
+                  SUM(CASE WHEN aggressor='BUY' THEN size ELSE 0 END) AS buy_vol,
+                  SUM(CASE WHEN aggressor='SELL' THEN size ELSE 0 END) AS sell_vol
            FROM ticks WHERE symbol=$1
            AND ts_event >= NOW() - INTERVAL '1 hour' * $2
            GROUP BY 1 ORDER BY ts""",
@@ -207,9 +207,21 @@ async def main():
 
         df_delta = await load_tick_delta(pool, args.symbol, args.hours)
         if df_delta is not None and len(df_delta) > 0:
+            # CRITICAL: DB time_bucket labels by period START,
+            # nt-base bar_buffer labels by bar CLOSE (1 min later).
+            # Shift delta index forward by 1 min so bar[09:47] gets delta from period 09:46-09:47.
+            df_delta.index = df_delta.index + pd.Timedelta(minutes=1)
+
             df_bars["delta"] = df_delta["delta"].reindex(df_bars.index).fillna(0.0)
+            df_bars["taker_buy_volume"] = df_delta["buy_vol"].reindex(df_bars.index).fillna(0.0)
+            df_bars["taker_sell_volume"] = df_delta["sell_vol"].reindex(df_bars.index).fillna(0.0)
+            # Use tick-accumulated volume (matches nt-base bar_buffer exactly)
+            # NOT the exchange bar volume from the bars table
+            df_bars["volume"] = df_bars["taker_buy_volume"] + df_bars["taker_sell_volume"]
         else:
             df_bars["delta"] = 0.0
+            df_bars["taker_buy_volume"] = df_bars["volume"] * 0.5
+            df_bars["taker_sell_volume"] = df_bars["volume"] * 0.5
 
         df_btc = await load_btc_bars(pool, args.hours)
 
@@ -217,8 +229,9 @@ async def main():
         df_btc_5m = None
         if df_btc is not None and len(df_btc) > 0:
             df_btc_5m = df_btc.resample("5min").last().dropna()
-            # Merge btc_close into df_bars for reference
-            df_bars["btc_close"] = df_btc["close"].reindex(df_bars.index).ffill()
+            # Merge btc_close into df_bars (ffill to match nt-base's behavior)
+            df_bars["btc_close"] = df_btc["close"].reindex(df_bars.index)
+            df_bars["btc_close"] = df_bars["btc_close"].ffill().fillna(df_bars["close"])
 
         # 3. Pre-compute factors
         logger.info("Pre-computing factors...")
