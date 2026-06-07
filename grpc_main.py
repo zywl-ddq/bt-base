@@ -51,6 +51,8 @@ class BacktestServicer(pb_grpc.TradingBaseServicer):
         self._strategy_id: str = ""
         self._bar_queue: asyncio.Queue = asyncio.Queue()
         self._signals: list[tuple[pb.Signal, pb.Bar]] = []
+        self._ready_event = asyncio.Event()
+        self._replay_done = False
 
     async def Register(self, request: pb.StrategyConfig, context) -> pb.RegisterAck:
         sid = request.strategy_id
@@ -71,12 +73,14 @@ class BacktestServicer(pb_grpc.TradingBaseServicer):
 
     async def SubscribeBars(self, request: pb.BarRequest, context):
         logger.info(f"Backtest SubscribeBars: {request.symbol}")
-        while context.is_active():
+        self._ready_event.set()
+        while not self._replay_done:
             try:
-                bar = await asyncio.wait_for(self._bar_queue.get(), timeout=60.0)
+                bar = await asyncio.wait_for(self._bar_queue.get(), timeout=0.5)
                 yield bar
             except asyncio.TimeoutError:
-                break
+                if self._replay_done:
+                    break
             except asyncio.CancelledError:
                 break
 
@@ -321,6 +325,9 @@ async def run_backtest(servicer: BacktestServicer, df_bars: pd.DataFrame,
         })
         equity += pnl
 
+    servicer._replay_done = True
+    # Wait for strategy to finish processing (drain any remaining signals)
+    await asyncio.sleep(2)
     return trades, equity_curve
 
 
@@ -351,9 +358,15 @@ async def main():
         await server.start()
         logger.info(f"bt-base gRPC listening on :{args.port}")
 
-        # 3. Wait briefly for strategy to connect, then replay
-        await asyncio.sleep(2)
-        logger.info(f"Replaying {len(df)} bars for strategy...")
+        # 3. Wait for strategy to connect and subscribe
+        logger.info("Waiting for strategy to connect...")
+        try:
+            await asyncio.wait_for(servicer._ready_event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error("Timeout waiting for strategy to connect")
+            await server.stop(grace=1.0)
+            return
+        logger.info("Strategy connected, starting replay...")
 
         trades, equity_curve = await run_backtest(servicer, df, args.initial_equity)
 
